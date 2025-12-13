@@ -317,6 +317,24 @@ ${contextSnippets}
   let applied = 0;
   for (const patch of patches) {
     const safeRel = clampToRepo(patch.filePath);
+    // 🚫 Never allow AI to modify CI/workflows or other dangerous areas
+const BLOCKED_PREFIXES = [
+  ".github/",
+  ".git/",
+  "node_modules/",
+  ".next/",
+  "dist/",
+  "build/",
+  "out/",
+  ".vercel/",
+];
+
+if (BLOCKED_PREFIXES.some((p) => safeRel.startsWith(p))) {
+  console.warn(`⛔ Blocked write: ${safeRel}`);
+  continue;
+}
+
+    
     if (!safeRel) {
       console.warn(`⚠️ Skipping unsafe path: ${patch.filePath}`);
       continue;
