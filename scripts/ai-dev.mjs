@@ -1,29 +1,36 @@
 #!/usr/bin/env node
 /**
- * Generic AI Dev Runner
+ * Generic AI Dev Runner — Claude Edition
  * - Runs inside a target repo directory (process.cwd()).
  * - Builds file tree + selects relevant context files.
- * - Calls OpenAI and applies @@FILE blocks as full-file overwrites.
+ * - Always injects docs/SOURCE_OF_TRUTH.md if present.
+ * - Calls Anthropic Claude and applies @@FILE blocks as full-file overwrites.
+ * - Opens a GitHub PR instead of committing directly to main.
  *
  * Usage (from target repo):
  *   node ../runner/scripts/ai-dev.mjs "your task here"
  *
  * Env:
- *   OPENAI_API_KEY (required)
- *   OPENAI_MODEL (optional, default: gpt-5.1)
+ *   ANTHROPIC_API_KEY        (required)
+ *   ANTHROPIC_MODEL          (optional, default: claude-opus-4-6 for complex, claude-sonnet-4-6 for simple)
  *   AI_DEV_MAX_CONTEXT_CHARS (optional, default: 180000)
- *   AI_DEV_MAX_FILES (optional, default: 35)
+ *   AI_DEV_MAX_FILES         (optional, default: 35)
+ *   AI_DEV_FORCE_MODEL       (optional, override auto model selection)
  */
 
 import fs from "fs";
 import path from "path";
 import process from "process";
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 
 // ---------- Config ----------
-const MODEL = (process.env.OPENAI_MODEL || "gpt-5.1").trim();
 const MAX_CONTEXT_CHARS = Number(process.env.AI_DEV_MAX_CONTEXT_CHARS || "180000");
 const MAX_FILES = Number(process.env.AI_DEV_MAX_FILES || "35");
+
+// Auto-select model based on task complexity (can be overridden)
+const FORCE_MODEL = (process.env.AI_DEV_FORCE_MODEL || "").trim();
+const MODEL_COMPLEX = "claude-opus-4-6";   // architectural changes, multi-file refactors
+const MODEL_SIMPLE  = "claude-sonnet-4-6"; // targeted fixes, single-file changes
 
 // Directories/files to ignore in tree + context selection
 const IGNORE_DIRS = new Set([
@@ -47,7 +54,14 @@ const IGNORE_FILE_EXTS = new Set([
   ".pdf", ".zip", ".7z",
 ]);
 
+// Always include these files in every context window
 const ALWAYS_CONTEXT_CANDIDATES = [
+  // ← SOURCE_OF_TRUTH.md guaranteed first so AI always knows the non-negotiables
+  "docs/SOURCE_OF_TRUTH.md",
+  "SOURCE_OF_TRUTH.md",
+  "MEMORY.md",
+  "docs/MEMORY.md",
+  // Standard config files
   "package.json",
   "README.md",
   "tsconfig.json",
@@ -69,6 +83,18 @@ const ALWAYS_CONTEXT_CANDIDATES = [
   "tailwind.config.js",
   "tailwind.config.cjs",
   "tailwind.config.ts",
+];
+
+// Paths the AI is never allowed to write to
+const BLOCKED_PREFIXES = [
+  ".github/",
+  ".git/",
+  "node_modules/",
+  ".next/",
+  "dist/",
+  "build/",
+  "out/",
+  ".vercel/",
 ];
 
 // ---------- Helpers ----------
@@ -115,7 +141,6 @@ function walkRepo(rootDir, relBase = "") {
 }
 
 function tokenizeTask(task) {
-  // crude keywords: words, file-like tokens, slash paths
   const raw = task
     .toLowerCase()
     .replace(/[`"'(),:;]+/g, " ")
@@ -134,13 +159,11 @@ function scoreFile(relPath, keywords) {
   const lower = relPath.toLowerCase();
   let score = 0;
 
-  // prioritize code + docs
   const ext = path.extname(lower);
   if ([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".md", ".mdx", ".json", ".css", ".scss"].includes(ext)) {
     score += 3;
   }
 
-  // boost obvious “core” files
   if (
     lower.includes("app/") ||
     lower.includes("src/") ||
@@ -151,7 +174,6 @@ function scoreFile(relPath, keywords) {
     lower.includes("services/")
   ) score += 2;
 
-  // keyword matches
   for (const k of keywords) {
     if (lower.includes(k)) score += 5;
   }
@@ -159,15 +181,28 @@ function scoreFile(relPath, keywords) {
   return score;
 }
 
+// Estimate task complexity to pick the right model
+function estimateComplexity(task) {
+  if (FORCE_MODEL) return FORCE_MODEL;
+
+  const lower = task.toLowerCase();
+  const complexSignals = [
+    "refactor", "redesign", "rewrite", "architecture", "migrate",
+    "add feature", "new page", "new api", "new component", "integrate",
+    "multiple", "across", "all pages", "whole", "entire",
+  ];
+  const isComplex = complexSignals.some((s) => lower.includes(s));
+  return isComplex ? MODEL_COMPLEX : MODEL_SIMPLE;
+}
+
 function clampToRepo(relPath) {
-  // Prevent path traversal
   const normalized = relPath.replace(/\\/g, "/").trim();
   if (!normalized) return null;
   if (normalized.startsWith("/") || normalized.startsWith("..") || normalized.includes("/..")) return null;
   return normalized;
 }
 
-// Parse @@FILE:...@@ blocks
+// Parse @@FILE:...@@ blocks from AI response
 function parsePatches(aiText) {
   const blocks = [];
   const regex = /@@FILE:([^\n@]+)@@([\s\S]*?)@@END_FILE@@/g;
@@ -183,13 +218,13 @@ function parsePatches(aiText) {
 function buildContext(allFiles, task) {
   const keywords = tokenizeTask(task);
 
-  // Always include candidates if present
+  // Always include candidates if present in repo
   const always = [];
   for (const p of ALWAYS_CONTEXT_CANDIDATES) {
     if (allFiles.includes(p)) always.push(p);
   }
 
-  // Include any explicit file paths mentioned in task
+  // Include any explicit file paths mentioned in the task
   const explicit = [];
   const fileMentionRegex = /([\w./-]+\.(ts|tsx|js|jsx|mjs|cjs|json|md|mdx|css|scss))/gi;
   let m;
@@ -200,7 +235,7 @@ function buildContext(allFiles, task) {
     }
   }
 
-  // Rank remaining files by relevance
+  // Rank remaining files by relevance score
   const ranked = allFiles
     .filter((f) => !always.includes(f) && !explicit.includes(f))
     .map((f) => ({ f, s: scoreFile(f, keywords) }))
@@ -210,11 +245,10 @@ function buildContext(allFiles, task) {
 
   const selected = [...new Set([...always, ...explicit, ...ranked])].slice(0, MAX_FILES);
 
-  // Construct context with a char budget
+  // Build context with char budget
   let used = 0;
   const chunks = [];
 
-  // File tree (always include, but trimmed)
   const treeText = allFiles.slice(0, 1500).join("\n");
   const treeChunk = `\n// REPO_FILE_TREE (truncated)\n${treeText}\n`;
   chunks.push(treeChunk);
@@ -239,10 +273,11 @@ async function main() {
   const task = process.argv.slice(2).join(" ").trim();
   if (!task) fatal('Usage: node scripts/ai-dev.mjs "Describe your change here"');
 
-  const apiKey = (process.env.OPENAI_API_KEY || "").trim();
-  if (!apiKey) fatal("OPENAI_API_KEY is not set.");
+  const apiKey = (process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey) fatal("ANTHROPIC_API_KEY is not set.");
 
-  const openai = new OpenAI({ apiKey });
+  const client = new Anthropic({ apiKey });
+  const model = estimateComplexity(task);
 
   // Build file list
   const root = process.cwd();
@@ -250,32 +285,35 @@ async function main() {
     .filter((p) => !p.endsWith("/"))
     .filter((p) => !isIgnoredPath(p));
 
-  if (!allFiles.length) fatal("No files found (or everything is ignored). Are you in the target repo directory?");
+  if (!allFiles.length) fatal("No files found. Are you in the target repo directory?");
 
   const contextSnippets = buildContext(allFiles, task);
 
   const systemPrompt = `
-You are an expert software engineer.
+You are an expert software engineer working on a production codebase.
 
-You receive:
-- A TASK description.
-- A repository file tree and selected file contents for context.
+You will receive:
+- A TASK description
+- A repository file tree and selected file contents for context
+- Crucially: a SOURCE_OF_TRUTH.md or MEMORY.md if present — read this FIRST and treat it as non-negotiable architectural rules
 
 Your job:
-- Make the smallest correct set of changes to implement the task.
-- Output ONLY patches in this exact format (no extra text):
+- Make the smallest correct set of changes to implement the task
+- ALWAYS check SOURCE_OF_TRUTH.md before making any change — never regress what it defines as non-negotiable
+- Output ONLY patches in this exact format (no explanation, no markdown, no extra text):
 
 @@FILE:relative/path/to/file.ext@@
 <FULL file contents here>
 @@END_FILE@@
 
 Rules:
-- Output FULL file contents for each changed/created file (no diffs).
-- Only include files that need to change.
-- Never write outside the repo (no absolute paths, no ../).
-- Do not delete files unless explicitly asked; prefer additive changes.
-- Preserve existing behavior unless the task requires changes.
-- Keep imports/exports valid and code compiling.
+- Output FULL file contents for each changed/created file (no diffs, no partial files)
+- Only include files that actually need to change
+- Never write outside the repo (no absolute paths, no ../)
+- Do not delete files unless explicitly asked — prefer additive changes
+- Preserve existing behaviour unless the task requires changes
+- Keep all imports/exports valid and the project compiling
+- If SOURCE_OF_TRUTH.md defines a conversion flow, SEO structure, or API contract — do not break it
 `.trim();
 
   const userPrompt = `
@@ -286,30 +324,34 @@ REPO CONTEXT:
 ${contextSnippets}
 `.trim();
 
-  console.log(`\n🤖 AI Dev Runner`);
-  console.log(`- Model: ${MODEL}`);
+  console.log(`\n🤖 AI Dev Runner — Claude Edition`);
+  console.log(`- Model: ${model}`);
   console.log(`- Repo: ${process.cwd()}`);
   console.log(`- Task: ${task}\n`);
 
-  const response = await openai.responses.create({
-    model: MODEL,
-    input: [
-      { role: "system", content: systemPrompt },
+  const response = await client.messages.create({
+    model,
+    max_tokens: 8096,
+    system: systemPrompt,
+    messages: [
       { role: "user", content: userPrompt },
     ],
   });
 
-  const out = response.output?.[0]?.content?.[0];
-  const aiText = out && typeof out.text === "string" ? out.text : "";
+  const aiText = response.content
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+
   if (!aiText) {
-    console.error("AI response did not contain a top-level text output.");
+    console.error("Claude response contained no text output.");
     console.error(JSON.stringify(response, null, 2));
     process.exit(1);
   }
 
   let patches = parsePatches(aiText);
   if (!patches.length) {
-    console.error("\n❌ No @@FILE blocks found. Raw response below:\n");
+    console.error("\n❌ No @@FILE blocks found in Claude response. Raw output below:\n");
     console.error(aiText);
     process.exit(1);
   }
@@ -317,33 +359,20 @@ ${contextSnippets}
   let applied = 0;
   for (const patch of patches) {
     const safeRel = clampToRepo(patch.filePath);
-    // 🚫 Never allow AI to modify CI/workflows or other dangerous areas
-const BLOCKED_PREFIXES = [
-  ".github/",
-  ".git/",
-  "node_modules/",
-  ".next/",
-  "dist/",
-  "build/",
-  "out/",
-  ".vercel/",
-];
 
-if (BLOCKED_PREFIXES.some((p) => safeRel.startsWith(p))) {
-  console.warn(`⛔ Blocked write: ${safeRel}`);
-  continue;
-}
+    if (BLOCKED_PREFIXES.some((p) => safeRel && safeRel.startsWith(p))) {
+      console.warn(`⛔ Blocked write to protected path: ${safeRel}`);
+      continue;
+    }
 
-    
     if (!safeRel) {
-      console.warn(`⚠️ Skipping unsafe path: ${patch.filePath}`);
+      console.warn(`⚠️  Skipping unsafe path: ${patch.filePath}`);
       continue;
     }
 
     const fullPath = path.join(process.cwd(), safeRel);
     const dirName = path.dirname(fullPath);
 
-    // Extra safety: strip accidental markers inside content
     const cleanContent = patch.content
       .replace(/^@@FILE:[^\n]*@@\s*/gm, "")
       .replace(/^@@END_FILE@@\s*/gm, "");
@@ -355,9 +384,9 @@ if (BLOCKED_PREFIXES.some((p) => safeRel.startsWith(p))) {
     applied++;
   }
 
-  if (!applied) fatal("No patches applied (all were unsafe?).");
+  if (!applied) fatal("No patches were applied (all paths were blocked or unsafe).");
 
-  console.log("\n✨ AI changes applied. Now run your normal build gate in CI before pushing.\n");
+  console.log("\n✨ Claude changes applied. Build gate will now validate before PR is opened.\n");
 }
 
 main().catch((err) => {
