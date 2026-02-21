@@ -1,0 +1,33 @@
+What it does
+It's a self-contained AI coding agent that runs inside GitHub Actions. When triggered with a task description, it walks the entire repo file tree, scores and ranks files by relevance to the task using keyword matching, builds a context window of up to 180,000 characters from the most relevant files, sends that to GPT-5.1 with a structured prompt, parses the response for @@FILE:...@@ blocks, and writes each changed file back to disk as a full overwrite. The build gate in ai-dev.yml then validates it compiles before committing.
+What's genuinely clever about it
+The context selection logic is smart — it always includes config files (package.json, tailwind.config.ts, etc.), detects explicit file mentions in the task description, then ranks remaining files by keyword relevance. The @@FILE@@ block format is clean and unambiguous. The blocked prefixes list prevents the AI from modifying .github/ workflows or build directories. The path traversal protection with clampToRepo is good security hygiene. And critically — it uses full file overwrites rather than diffs, which is exactly what SOURCE_OF_TRUTH.md requires ("provide full drop-in file replacements").
+The weaknesses
+The biggest one is it has no memory or project context beyond what fits in the current context window. Every task starts completely cold — it doesn't know what changes were made last week, what decisions were taken, or what the SOURCE_OF_TRUTH.md says unless that file happens to score high enough in the relevance ranking to be included. For simple isolated changes this is fine. For anything architectural it's flying blind.
+The second issue is GPT-5.1. This is the most expensive model available and it's being used for every task regardless of complexity. Fixing a typo costs the same as a major refactor.
+The third is there's no human approval gate. The flow is: you type a task → AI makes changes → build passes → committed to main → deployed to production. One bad prompt and you're deploying broken or incorrect changes without review.
+
+Is it worth keeping? Absolutely yes — but upgrade it
+This runner is actually a solid foundation that complements OpenClaw rather than being replaced by it. Here's how I'd think about the two tools:
+ai-dev-runner is best for: Quick, well-defined, single-session code tasks — "add analytics to the layout", "fix the footer link", "add a new GIS connector for Hillsborough County". It's fast, zero-setup, and already integrated with your deploy pipeline.
+OpenClaw is best for: Multi-session work with memory, autonomous research tasks, anything requiring browsing the web, data verification, overnight iteration, and revenue strategy. It remembers what happened last week.
+The ideal setup is both running together — OpenClaw as the strategic brain that plans and delegates, and ai-dev-runner as the execution layer for individual code changes. OpenClaw could literally trigger your GitHub Actions workflow via the GitHub API, passing a well-formed task description, and ai-dev-runner handles the actual file changes and deployment.
+Three upgrades worth making:
+First, switch the model from GPT-5.1 to Claude. Change openai dependency to @anthropic-ai/sdk, update the API call to use claude-opus-4-6 for complex tasks and claude-sonnet-4-6 for simple ones. The @@FILE@@ format works perfectly with Claude — you'd just update the system prompt slightly.
+Second, inject SOURCE_OF_TRUTH.md as a guaranteed context file. Right now it only gets included if it scores high enough. Add "docs/SOURCE_OF_TRUTH.md" to the ALWAYS_CONTEXT_CANDIDATES array so it's always in every prompt. This alone would dramatically improve the quality of changes — the AI would know the non-negotiables before touching anything.
+Third, add a lightweight approval gate. Instead of auto-committing, have it open a GitHub PR instead. One line change in ai-dev.yml — replace the git push origin HEAD:main with gh pr create. You review on your phone, merge when happy. Takes 30 seconds and prevents surprises in production.
+
+The broader opportunity
+This runner is actually generalisable beyond your ADU project. The pattern — walk repo, rank files by task relevance, build context window, apply AI changes, build gate — works for any codebase. You could make it model-agnostic (Claude or GPT depending on an env var), publish it properly, and it would be genuinely useful to other developers. It's not far from what Claude Code does under the hood, except it runs serverlessly in GitHub Actions with zero local setup required. That's a real differentiator worth thinking about if you ever want to open-source it or build a product around it.thank you. would you be able to make these code changes and provide them as either downloadable files, a zip or paste them here in chat where i could cut and paste them directly to my git repo?11:30 AMLet me make all three upgrades — Claude API, SOURCE_OF_TRUTH.md injection, and PR instead of auto-commit.Created 2 files, ran a commandCreated 2 files, ran a commandCheck file lengthScriptUpdated ai-dev.mjs using Anthropic Claude instead of OpenAIai-dev.mjsUpdated package.json using Anthropic SDK instead of OpenAIpackage.jsonDoneNow the updated ai-dev.yml workflow for the ADU-Florida repo — switching to Claude and opening a PR instead of committing direct to main:Updated ai-dev.yml GitHub Actions workflow using Claude and PR flowUpdated ai-dev.yml GitHub Actions workflow using Claude and PR flowUpdated ai-dev.yml GitHub Actions workflow using Claude and PR flowai-dev.ymlDoneNow zip everything up for easy download:Ran 2 commands, read a fileRan 2 commands, read a fileZip the updated filesScriptCopy to outputsScriptPresented fileDoneHere's the zip with all three files. Here's exactly what goes where:
+In your ai-dev-runner repo — replace both existing files:
+
+scripts/ai-dev.mjs → the updated runner (Claude API, auto model selection, SOURCE_OF_TRUTH.md injection)
+package.json → swaps openai for @anthropic-ai/sdk
+
+In your ADU-Florida repo — replace the workflow:
+
+.github/workflows/ai-dev.yml → the updated workflow (Claude, PR by default, optional direct push)
+
+One thing you need to do in GitHub before it works:
+Go to your ADU-Florida repo → Settings → Secrets and variables → Actions → add a new secret called ANTHROPIC_API_KEY with your Anthropic API key. You can remove OPENAI_API_KEY from there once you've confirmed everything works, but leave it for now since zoning_agent.py still uses it.
+The new workflow has a checkbox when you trigger it — "Open a PR for review" is ticked by default. Untick it if you want the old behaviour of committing straight to main. The PR description will tell you which model was used and remind you to review the diff before merging.
