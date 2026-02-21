@@ -2,8 +2,8 @@
   "name": "ai-dev-runner",
   "private": false,
   "type": "module",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "dependencies": {
-    "openai": "^4.0.0"
+    "@anthropic-ai/sdk": "^0.39.0"
   }
 }

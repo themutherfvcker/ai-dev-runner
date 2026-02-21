@@ -1,0 +1,117 @@
+name: AI Dev (Claude)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Describe what you want Claude to do"
+        required: true
+        type: string
+      model:
+        description: "Model override (leave blank for auto-selection)"
+        required: false
+        type: string
+        default: ""
+      open_pr:
+        description: "Open a PR for review instead of committing direct to main"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ai-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: themutherfvcker/ai-dev-runner
+          path: runner
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Versions
+        run: |
+          node -v
+          npm -v
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install target repo deps
+        run: |
+          set -e
+          if [ -f package-lock.json ]; then
+            echo "Found package-lock.json — trying npm ci..."
+            if npm ci; then
+              echo "npm ci succeeded."
+            else
+              echo "npm ci failed (lock out of sync) — falling back to npm install..."
+              npm install
+            fi
+          else
+            npm install
+          fi
+
+      - name: Install runner deps
+        working-directory: runner
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: Run Claude AI change
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_DEV_FORCE_MODEL: ${{ inputs.model }}
+        run: node runner/scripts/ai-dev.mjs "${{ github.event.inputs.task }}"
+
+      - name: Build gate (must pass before any commit or PR)
+        run: npm run build
+
+      - name: Commit and open PR (or push direct to main)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [[ -z "$(git status --porcelain)" ]]; then
+            echo "No changes — nothing to commit."
+            exit 0
+          fi
+
+          TASK="${{ github.event.inputs.task }}"
+          SAFE_TASK=$(printf "%s" "$TASK" | tr '\n\r' ' ' | sed 's/["`$\\]/ /g' | sed 's/  */ /g' | cut -c1-120)
+          BRANCH="ai-dev/$(date +%Y%m%d-%H%M%S)"
+
+          git add .
+          git commit -m "AI Dev (Claude): ${SAFE_TASK}"
+
+          if [[ "${{ inputs.open_pr }}" == "true" ]]; then
+            git push origin HEAD:$BRANCH
+            gh pr create \
+              --title "AI Dev (Claude): ${SAFE_TASK}" \
+              --body "**Task:** ${TASK}
+
+**Model:** Auto-selected (claude-opus-4-6 for complex, claude-sonnet-4-6 for simple)
+
+**Build gate:** ✅ Passed
+
+Review the diff carefully before merging. This PR was generated autonomously by the AI Dev Runner." \
+              --base main \
+              --head $BRANCH
+            echo "✅ PR opened: $BRANCH"
+          else
+            git pull --rebase origin main
+            git push origin HEAD:main
+            echo "✅ Pushed direct to main."
+          fi
