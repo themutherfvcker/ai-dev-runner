@@ -1,9 +1,20 @@
 {
   "name": "ai-dev-runner",
+  "version": "3.0.0",
   "private": false,
   "type": "module",
-  "version": "2.0.0",
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0"
+  "description": "AI-powered code changes via GitHub Actions. Supports Claude, OpenAI, Gemini, and Ollama.",
+  "keywords": ["ai", "automation", "github-actions", "claude", "openai", "gemini", "ollama"],
+  "dependencies": {},
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "openai": "^4.0.0",
+    "@google/generative-ai": "^0.24.0"
+  },
+  "scripts": {
+    "install:claude":  "npm install @anthropic-ai/sdk",
+    "install:openai":  "npm install openai",
+    "install:gemini":  "npm install @google/generative-ai",
+    "install:all":     "npm install @anthropic-ai/sdk openai @google/generative-ai"
   }
 }

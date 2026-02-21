@@ -1,19 +1,36 @@
-name: AI Dev (Claude)
+name: AI Dev (Multi-Model)
 
 on:
   workflow_dispatch:
     inputs:
       task:
-        description: "Describe what you want Claude to do"
+        description: "Describe what you want the AI to do"
         required: true
         type: string
       model:
-        description: "Model override (leave blank for auto-selection)"
-        required: false
-        type: string
-        default: ""
+        description: "Model to use"
+        required: true
+        type: choice
+        default: "claude-sonnet-4-6"
+        options:
+          # ── Anthropic Claude ──────────────────────────────
+          - claude-sonnet-4-6       # Fast, smart — best for most tasks
+          - claude-opus-4-6         # Most capable — best for complex refactors
+          - claude-haiku-4-5-20251001  # Cheapest — best for simple/targeted fixes
+          # ── OpenAI ────────────────────────────────────────
+          - gpt-5.2                 # Flagship — best for complex coding tasks
+          - gpt-5.2-chat-latest     # Instant variant — faster, cheaper
+          - gpt-5.1                 # Previous gen — good value fallback
+          - gpt-4o                  # Older but cheapest OpenAI option
+          # ── Google Gemini ─────────────────────────────────
+          - gemini-2.0-flash        # Fast Gemini
+          - gemini-2.5-pro-preview-03-25  # Most capable Gemini
+          # ── Local / Self-hosted ───────────────────────────
+          - ollama:llama3           # Local Llama 3 via Ollama
+          - ollama:codestral        # Local Codestral via Ollama
+          - ollama:deepseek-coder   # Local DeepSeek Coder via Ollama
       open_pr:
-        description: "Open a PR for review instead of committing direct to main"
+        description: "Open a PR for review (uncheck to commit direct to main)"
         required: false
         type: boolean
         default: true
@@ -25,6 +42,7 @@ permissions:
 jobs:
   ai-dev:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,11 +58,6 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Versions
-        run: |
-          node -v
-          npm -v
-
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
@@ -52,32 +65,58 @@ jobs:
         run: |
           set -e
           if [ -f package-lock.json ]; then
-            echo "Found package-lock.json — trying npm ci..."
-            if npm ci; then
-              echo "npm ci succeeded."
-            else
-              echo "npm ci failed (lock out of sync) — falling back to npm install..."
-              npm install
-            fi
+            npm ci || npm install
           else
             npm install
           fi
 
-      - name: Install runner deps
+      - name: Install runner deps for selected provider
         working-directory: runner
         run: |
-          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          MODEL="${{ inputs.model }}"
+          echo "Selected model: $MODEL"
 
-      - name: Run Claude AI change
+          if [[ "$MODEL" == claude-* ]]; then
+            echo "Installing Anthropic SDK..."
+            npm install @anthropic-ai/sdk
+
+          elif [[ "$MODEL" == gpt-* ]] || [[ "$MODEL" == o1* ]] || [[ "$MODEL" == o3* ]] || [[ "$MODEL" == o4* ]] || [[ "$MODEL" == chatgpt-* ]]; then
+            echo "Installing OpenAI SDK..."
+            npm install openai
+
+          elif [[ "$MODEL" == gemini-* ]]; then
+            echo "Installing Google Generative AI SDK..."
+            npm install @google/generative-ai
+
+          elif [[ "$MODEL" == ollama:* ]]; then
+            echo "Ollama uses native fetch — no SDK needed."
+
+          else
+            echo "Unknown model prefix: $MODEL — installing all SDKs as fallback..."
+            npm install @anthropic-ai/sdk openai @google/generative-ai
+          fi
+
+      - name: Run AI code change
+        working-directory: ${{ github.workspace }}
         env:
+          AI_DEV_MODEL: ${{ inputs.model }}
+          # ── Anthropic ──────────────────────────────────────────────────────
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          AI_DEV_FORCE_MODEL: ${{ inputs.model }}
+          # ── OpenAI ────────────────────────────────────────────────────────
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # ── Azure OpenAI (optional) ────────────────────────────────────────
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          # ── Google Gemini ──────────────────────────────────────────────────
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          # ── Ollama (self-hosted) ───────────────────────────────────────────
+          OLLAMA_HOST: ${{ secrets.OLLAMA_HOST }}
         run: node runner/scripts/ai-dev.mjs "${{ github.event.inputs.task }}"
 
-      - name: Build gate (must pass before any commit or PR)
+      - name: Build gate (must pass before commit or PR)
         run: npm run build
 
-      - name: Commit and open PR (or push direct to main)
+      - name: Commit and open PR or push direct
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -85,33 +124,38 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if [[ -z "$(git status --porcelain)" ]]; then
-            echo "No changes — nothing to commit."
+            echo "No changes detected — nothing to commit."
             exit 0
           fi
 
           TASK="${{ github.event.inputs.task }}"
-          SAFE_TASK=$(printf "%s" "$TASK" | tr '\n\r' ' ' | sed 's/["`$\\]/ /g' | sed 's/  */ /g' | cut -c1-120)
+          MODEL="${{ inputs.model }}"
+          SAFE_TASK=$(printf "%s" "$TASK" | tr '\n\r' ' ' | sed 's/["`$\\]/ /g' | cut -c1-120)
           BRANCH="ai-dev/$(date +%Y%m%d-%H%M%S)"
 
           git add .
-          git commit -m "AI Dev (Claude): ${SAFE_TASK}"
+          git commit -m "AI Dev [${MODEL}]: ${SAFE_TASK}"
 
           if [[ "${{ inputs.open_pr }}" == "true" ]]; then
             git push origin HEAD:$BRANCH
             gh pr create \
-              --title "AI Dev (Claude): ${SAFE_TASK}" \
-              --body "**Task:** ${TASK}
+              --title "AI Dev [${MODEL}]: ${SAFE_TASK}" \
+              --body "## AI Dev Runner
 
-**Model:** Auto-selected (claude-opus-4-6 for complex, claude-sonnet-4-6 for simple)
+**Task:** ${TASK}
+
+**Model used:** \`${MODEL}\`
 
 **Build gate:** ✅ Passed
 
-Review the diff carefully before merging. This PR was generated autonomously by the AI Dev Runner." \
+---
+Review the diff carefully before merging.
+This PR was generated autonomously by the AI Dev Runner." \
               --base main \
               --head $BRANCH
-            echo "✅ PR opened: $BRANCH"
+            echo "✅ PR opened on branch: $BRANCH"
           else
             git pull --rebase origin main
             git push origin HEAD:main
-            echo "✅ Pushed direct to main."
+            echo "✅ Changes pushed direct to main."
           fi
