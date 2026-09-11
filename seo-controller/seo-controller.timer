@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll SEO controller queues every minute
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Persistent=true
+Unit=seo-controller.service
+
+[Install]
+WantedBy=timers.target
