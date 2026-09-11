@@ -40,6 +40,10 @@ def match(text, keyword):
     return (False, coverage, min((i for i,w in enumerate(words) if w in kw), default=-1))
 
 
+def grade(total):
+    return "A" if total >= 85 else "B" if total >= 70 else "C" if total >= 55 else "D" if total >= 40 else "F"
+
+
 class Parser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -94,7 +98,8 @@ def score(url, keyword):
     exact,cov,_=match(slug,keyword); n=len(toks(slug))
     s=(7 if exact else 4 if cov==1 else round(7*cov*.3,1)) + (3 if n<=6 else 2 if n<=9 else 1)
     detail["slug"]=s; total+=s
-    return {"url":url,"keyword":keyword,"total":round(100*total/110,1),"elements":detail}
+    total=round(100*total/110,1)
+    return {"url":url,"keyword":keyword,"total":total,"grade":grade(total),"elements":detail}
 
 
 def main():
