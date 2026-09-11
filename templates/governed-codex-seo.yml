@@ -113,6 +113,7 @@ jobs:
             -c 'apps._default.enabled=false'
             -c 'tools.web_search=false'
             -c 'agents.enabled=false'
+            -c 'features.code_mode_host=false'
             -c 'memories.use_memories=false'
             -c 'memories.generate_memories=false'
             -c "model_reasoning_effort=\"$CODEX_EFFORT\""
