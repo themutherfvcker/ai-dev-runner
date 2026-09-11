@@ -1,0 +1,19 @@
+{
+  "poll_seconds": 60,
+  "projects": {
+    "brevard": {
+      "repo": "themutherfvcker/brevardsepticservices",
+      "checkout": "/home/dev/agency/projects/brevardsepticservices-codex",
+      "queue_issue": 6,
+      "token_env_file": "/home/dev/.config/hsp-handoff/brevard.env",
+      "task_prefix": "BSS-"
+    },
+    "huntsville": {
+      "repo": "themutherfvcker/huntsvillesepticpros",
+      "checkout": "/home/dev/agency/projects/huntsvillesepticpros-codex",
+      "queue_issue": 2,
+      "token_env_file": "/home/dev/.config/hsp-handoff/env",
+      "task_prefix": "HSP-"
+    }
+  }
+}
