@@ -2,12 +2,19 @@
 import argparse, fnmatch, json, subprocess
 from pathlib import PurePosixPath
 
-HARD_BLOCKED = (".github/",)
+HARD_BLOCKED = (
+    ".github/",
+    "scripts/seo-governance/",
+)
 
 
 def changed_files() -> list[str]:
-    tracked = subprocess.check_output(["git", "diff", "--name-only", "--diff-filter=ACMRTUXB"], text=True).splitlines()
-    untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], text=True).splitlines()
+    tracked = subprocess.check_output(
+        ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB"], text=True
+    ).splitlines()
+    untracked = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard"], text=True
+    ).splitlines()
     return sorted(set(x.strip() for x in tracked + untracked if x.strip()))
 
 
@@ -33,7 +40,7 @@ def main() -> None:
     for path in changed:
         PurePosixPath(path)
         if path.startswith(HARD_BLOCKED):
-            violations.append((path, "hard-blocked workflow path"))
+            violations.append((path, "hard-blocked governance/workflow path"))
             continue
         if not any(matches(path, rule) for rule in allowed):
             violations.append((path, "outside allowed_paths"))
