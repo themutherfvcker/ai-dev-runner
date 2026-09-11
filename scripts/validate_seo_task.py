@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 
 TASK_RE = re.compile(r"^(BSS|HSP)-\d{3,}$")
+ALLOWED_EFFORT = {"low", "medium", "high"}
 
 
 def safe_rel(value: str) -> str:
@@ -43,6 +44,9 @@ def main() -> None:
         raise SystemExit("task is not explicitly Joe-authorized")
     if data.get("mode") != "write":
         raise SystemExit("this workflow only accepts mode=write")
+    if data.get("billing") != "chatgpt_subscription":
+        raise SystemExit("billing must be chatgpt_subscription; API billing is not permitted")
+
     task_id = data.get("task_id", "")
     if not TASK_RE.fullmatch(task_id):
         raise SystemExit("invalid task_id")
@@ -68,23 +72,31 @@ def main() -> None:
         if date.today() < eligible_date:
             raise SystemExit(f"observation window active until {eligible_date.isoformat()}")
 
+    model = data.get("model", "")
+    if model is not None and not isinstance(model, str):
+        raise SystemExit("model must be a string when supplied")
+    effort = data.get("effort", "medium")
+    if effort not in ALLOWED_EFFORT:
+        raise SystemExit(f"effort must be one of {sorted(ALLOWED_EFFORT)}")
+
     fs = data.get("four_stars") or {}
     enabled = bool(fs.get("enabled", False))
     if enabled:
         for key in ("production_url", "route", "keyword"):
             if not isinstance(fs.get(key), str) or not fs[key].strip():
                 raise SystemExit(f"four_stars.{key} is required when enabled")
+
     out("task_id", task_id)
     out("prompt_file", prompt_file)
-    out("model", data.get("model", ""))
-    out("effort", data.get("effort", "medium"))
+    out("model", model or "")
+    out("effort", effort)
     out("four_stars_enabled", enabled)
     out("four_stars_production_url", fs.get("production_url", ""))
     out("four_stars_route", fs.get("route", ""))
     out("four_stars_keyword", fs.get("keyword", ""))
     out("four_stars_min_delta", fs.get("min_delta", 0))
     out("manifest_path", manifest_path)
-    print(f"PASS: authorized governed task {task_id}")
+    print(f"PASS: authorized subscription-backed governed task {task_id}")
 
 
 if __name__ == "__main__":
