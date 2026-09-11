@@ -19,20 +19,43 @@ jobs:
       github.event.issue.pull_request == null &&
       github.actor == 'themutherfvcker' &&
       startsWith(github.event.comment.body, 'CODEX_TASK:')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, seo-codex]
 
     steps:
+      - name: Verify isolated subscription runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${USER:-}" == "dev" ]]; then
+            echo "Refusing to run Codex under credential-heavy dev user" >&2
+            exit 2
+          fi
+          if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+            echo "OPENAI_API_KEY is forbidden: use ChatGPT subscription auth" >&2
+            exit 2
+          fi
+          for path in /home/dev/.config/seo-geo.env /home/dev/.config/gsc-sa.json; do
+            if [[ -r "$path" ]]; then
+              echo "Runner can read protected credential path: $path" >&2
+              exit 2
+            fi
+          done
+          command -v codex >/dev/null
+          codex login status
+
       - name: Checkout target repository
         uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+          clean: true
 
       - name: Parse bounded dispatch
         id: dispatch
         env:
           COMMENT: ${{ github.event.comment.body }}
+        shell: bash
         run: |
           set -euo pipefail
           MANIFEST="$(printf '%s\n' "$COMMENT" | sed -n '1s/^CODEX_TASK:[[:space:]]*//p')"
@@ -46,55 +69,82 @@ jobs:
           fi
           echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout deterministic SEO runner
-        uses: actions/checkout@v5
-        with:
-          repository: themutherfvcker/ai-dev-runner
-          ref: feat/seo-actions-v2
-          path: _seo_runner
-          persist-credentials: false
-
-      - name: Relocate runner outside target worktree
+      - name: Snapshot trusted governance outside writable worktree
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/seo-runner"
-          cp -a _seo_runner/. "$RUNNER_TEMP/seo-runner/"
-          rm -rf _seo_runner
-          echo "SEO_RUNNER=$RUNNER_TEMP/seo-runner" >> "$GITHUB_ENV"
+          rm -rf "$RUNNER_TEMP/seo-governance"
+          mkdir -p "$RUNNER_TEMP/seo-governance"
+          cp -a scripts/seo-governance/. "$RUNNER_TEMP/seo-governance/"
+          echo "SEO_GOVERNANCE=$RUNNER_TEMP/seo-governance" >> "$GITHUB_ENV"
 
       - name: Validate task authorization and observation window
         id: contract
+        shell: bash
         run: |
-          python3 "$SEO_RUNNER/scripts/validate_seo_task.py" \
+          python3 "$SEO_GOVERNANCE/validate_seo_task.py" \
             "${{ steps.dispatch.outputs.manifest }}" \
             --repo "${{ github.repository }}"
 
       - name: Install project dependencies before Codex
         run: npm ci
 
-      - name: Run disposable Codex implementer
+      - name: Run disposable subscription-authenticated Codex
         id: codex
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          permission-profile: ':workspace'
-          prompt-file: ${{ steps.contract.outputs.prompt_file }}
-          model: ${{ steps.contract.outputs.model }}
-          effort: ${{ steps.contract.outputs.effort }}
-          safety-strategy: drop-sudo
+        shell: bash
+        env:
+          PROMPT_FILE: ${{ steps.contract.outputs.prompt_file }}
+          MANIFEST_FILE: ${{ steps.dispatch.outputs.manifest }}
+          CODEX_MODEL: ${{ steps.contract.outputs.model }}
+          CODEX_EFFORT: ${{ steps.contract.outputs.effort }}
+        run: |
+          set -euo pipefail
+          CODEX_HOME_REAL="${CODEX_HOME:-$HOME/.codex}"
+          ARGS=(
+            exec
+            --cd "$GITHUB_WORKSPACE"
+            --skip-git-repo-check
+            --ignore-user-config
+            --ignore-rules
+            --strict-config
+            --sandbox workspace-write
+            --ephemeral
+            --json
+            -c 'apps._default.enabled=false'
+            -c 'tools.web_search=false'
+            -c 'agents.enabled=false'
+            -c 'memories.use_memories=false'
+            -c 'memories.generate_memories=false'
+            -c "model_reasoning_effort=\"$CODEX_EFFORT\""
+            -o "$RUNNER_TEMP/codex-last-message.md"
+          )
+          if [[ -n "$CODEX_MODEL" ]]; then
+            ARGS+=(--model "$CODEX_MODEL")
+          fi
+          INSTRUCTION="Read AGENTS.md, $PROMPT_FILE, and $MANIFEST_FILE. Execute only the explicitly authorized task. Modify only allowed_paths from the manifest. Do not commit, push, deploy, access external apps/connectors, or read files outside this workspace. Stop after implementation and a concise self-check."
+          env -i \
+            HOME="$HOME" \
+            USER="${USER:-runner}" \
+            LOGNAME="${LOGNAME:-${USER:-runner}}" \
+            PATH="$PATH" \
+            LANG="${LANG:-C.UTF-8}" \
+            CODEX_HOME="$CODEX_HOME_REAL" \
+            codex "${ARGS[@]}" "$INSTRUCTION" \
+            > "$RUNNER_TEMP/codex-events.jsonl"
 
-      - name: Enforce task scope
-        run: python3 "$SEO_RUNNER/scripts/check_scope.py" "${{ steps.dispatch.outputs.manifest }}"
+      - name: Enforce task scope before executing changed code
+        run: python3 "$SEO_GOVERNANCE/check_scope.py" "${{ steps.dispatch.outputs.manifest }}"
 
       - name: Build gate
         run: npm run build
 
       - name: Start candidate site for Four Stars
         if: steps.contract.outputs.four_stars_enabled == 'true'
+        shell: bash
         run: |
           set -euo pipefail
-          npm run start -- -p 3000 > /tmp/seo-next.log 2>&1 &
-          echo $! > /tmp/seo-next.pid
+          npm run start -- -p 3000 > "$RUNNER_TEMP/seo-next.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/seo-next.pid"
           python3 - <<'PY'
           import time, urllib.request
           for _ in range(40):
@@ -108,24 +158,33 @@ jobs:
 
       - name: Four Stars regression gate
         if: steps.contract.outputs.four_stars_enabled == 'true'
+        shell: bash
         run: |
-          python3 "$SEO_RUNNER/scripts/four_stars_compare.py" \
-            --tool-dir "$SEO_RUNNER/tools/four-stars" \
+          python3 "$SEO_GOVERNANCE/four_stars_compare.py" \
+            --tool-dir "$SEO_GOVERNANCE/four-stars" \
             --baseline-url "${{ steps.contract.outputs.four_stars_production_url }}" \
             --candidate-url "http://127.0.0.1:3000${{ steps.contract.outputs.four_stars_route }}" \
             --keyword "${{ steps.contract.outputs.four_stars_keyword }}" \
-            --min-delta "${{ steps.contract.outputs.four_stars_min_delta }}"
+            --min-delta "${{ steps.contract.outputs.four_stars_min_delta }}" \
+            --output "$RUNNER_TEMP/four-stars-comparison.json"
 
       - name: Stop candidate site
         if: always() && steps.contract.outputs.four_stars_enabled == 'true'
+        shell: bash
         run: |
-          if [[ -f /tmp/seo-next.pid ]]; then kill "$(cat /tmp/seo-next.pid)" 2>/dev/null || true; fi
+          if [[ -f "$RUNNER_TEMP/seo-next.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/seo-next.pid")" 2>/dev/null || true
+          fi
 
-      - name: Commit, push branch and open draft PR
+      - name: Enforce final scope
+        run: python3 "$SEO_GOVERNANCE/check_scope.py" "${{ steps.dispatch.outputs.manifest }}"
+
+      - name: Commit and push governed branch
+        id: push
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TASK_ID: ${{ steps.contract.outputs.task_id }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
           BRANCH="codex/${TASK_ID}-${GITHUB_RUN_ID}"
@@ -135,5 +194,27 @@ jobs:
           git add -A
           git commit -m "${TASK_ID}: Codex implementation"
           git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f' push origin "HEAD:$BRANCH"
-          PR_URL="$(gh pr create --draft --base main --head "$BRANCH" --title "${TASK_ID}: governed Codex implementation" --body "Governed Codex implementation for ${TASK_ID}. Mechanical gates passed: scope, build, and Four Stars when enabled. Review the Vercel preview and diff before merge. No auto-merge is configured.")"
-          gh issue comment "$ISSUE_NUMBER" --body "${TASK_ID} READY_FOR_REVIEW: ${PR_URL}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Open draft PR and report result
+        uses: actions/github-script@v7
+        env:
+          TASK_ID: ${{ steps.contract.outputs.task_id }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `${process.env.TASK_ID}: governed Codex implementation`,
+              head: process.env.BRANCH,
+              base: 'main',
+              draft: true,
+              body: `Governed subscription-backed Codex implementation for ${process.env.TASK_ID}. Mechanical scope/build/Four Stars gates passed where applicable. Review the Vercel preview and diff before merge. No auto-merge is configured.`
+            });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `${process.env.TASK_ID} READY_FOR_REVIEW: ${pr.html_url}`
+            });
