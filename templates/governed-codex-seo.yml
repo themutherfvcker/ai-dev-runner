@@ -54,10 +54,18 @@ jobs:
           path: _seo_runner
           persist-credentials: false
 
+      - name: Relocate runner outside target worktree
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/seo-runner"
+          cp -a _seo_runner/. "$RUNNER_TEMP/seo-runner/"
+          rm -rf _seo_runner
+          echo "SEO_RUNNER=$RUNNER_TEMP/seo-runner" >> "$GITHUB_ENV"
+
       - name: Validate task authorization and observation window
         id: contract
         run: |
-          python3 _seo_runner/scripts/validate_seo_task.py \
+          python3 "$SEO_RUNNER/scripts/validate_seo_task.py" \
             "${{ steps.dispatch.outputs.manifest }}" \
             --repo "${{ github.repository }}"
 
@@ -76,7 +84,7 @@ jobs:
           safety-strategy: drop-sudo
 
       - name: Enforce task scope
-        run: python3 _seo_runner/scripts/check_scope.py "${{ steps.dispatch.outputs.manifest }}"
+        run: python3 "$SEO_RUNNER/scripts/check_scope.py" "${{ steps.dispatch.outputs.manifest }}"
 
       - name: Build gate
         run: npm run build
@@ -101,8 +109,8 @@ jobs:
       - name: Four Stars regression gate
         if: steps.contract.outputs.four_stars_enabled == 'true'
         run: |
-          python3 _seo_runner/scripts/four_stars_compare.py \
-            --tool-dir _seo_runner/tools/four-stars \
+          python3 "$SEO_RUNNER/scripts/four_stars_compare.py" \
+            --tool-dir "$SEO_RUNNER/tools/four-stars" \
             --baseline-url "${{ steps.contract.outputs.four_stars_production_url }}" \
             --candidate-url "http://127.0.0.1:3000${{ steps.contract.outputs.four_stars_route }}" \
             --keyword "${{ steps.contract.outputs.four_stars_keyword }}" \
