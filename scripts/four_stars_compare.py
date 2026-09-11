@@ -20,7 +20,7 @@ def main() -> None:
     ap.add_argument("--output", default="four-stars-comparison.json")
     args = ap.parse_args()
 
-    cli = Path(args.tool_dir) / "cli.py"
+    cli = Path(args.tool_dir) / "four_stars_ci.py"
     before = score(cli, args.baseline_url, args.keyword)
     after = score(cli, args.candidate_url, args.keyword)
     delta = round(after["total"] - before["total"], 1)
