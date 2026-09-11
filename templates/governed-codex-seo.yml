@@ -40,8 +40,16 @@ jobs:
               exit 2
             fi
           done
-          command -v codex >/dev/null
-          codex login status
+
+      - name: Ensure complete Codex standalone install
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$HOME/.codex/packages/standalone/current/bin/codex" || ! -x "$HOME/.codex/packages/standalone/current/bin/codex-code-mode-host" ]]; then
+            curl -fsSL https://chatgpt.com/codex/install.sh | sh
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/codex" login status
 
       - name: Checkout target repository
         uses: actions/checkout@v5
@@ -113,7 +121,6 @@ jobs:
             -c 'apps._default.enabled=false'
             -c 'tools.web_search=false'
             -c 'agents.enabled=false'
-            -c 'features.code_mode_host=false'
             -c 'memories.use_memories=false'
             -c 'memories.generate_memories=false'
             -c "model_reasoning_effort=\"$CODEX_EFFORT\""
