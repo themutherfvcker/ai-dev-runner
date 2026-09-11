@@ -204,25 +204,16 @@ jobs:
           git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f' push origin "HEAD:$BRANCH"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Open draft PR and report result
+      - name: Report governed branch for ChatGPT review
         uses: actions/github-script@v7
         env:
           TASK_ID: ${{ steps.contract.outputs.task_id }}
           BRANCH: ${{ steps.push.outputs.branch }}
         with:
           script: |
-            const { data: pr } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `${process.env.TASK_ID}: governed Codex implementation`,
-              head: process.env.BRANCH,
-              base: 'main',
-              draft: true,
-              body: `Governed subscription-backed Codex implementation for ${process.env.TASK_ID}. Mechanical scope/build/Four Stars gates passed where applicable. Review the Vercel preview and diff before merge. No auto-merge is configured.`
-            });
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: `${process.env.TASK_ID} READY_FOR_REVIEW: ${pr.html_url}`
+              body: `${process.env.TASK_ID} READY_FOR_REVIEW_BRANCH: ${process.env.BRANCH}\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
             });
