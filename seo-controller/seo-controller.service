@@ -1,0 +1,23 @@
+[Unit]
+Description=Shared SEO Codex Controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=dev
+Group=dev
+WorkingDirectory=/home/dev/agency/seo-controller
+Environment=HOME=/home/dev
+Environment=PATH=/home/dev/.local/bin:/home/dev/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/bin/python3 /home/dev/agency/seo-controller/controller.py
+Nice=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/dev/agency /home/dev/.config /tmp
+TimeoutStartSec=3h
+
+[Install]
+WantedBy=multi-user.target
